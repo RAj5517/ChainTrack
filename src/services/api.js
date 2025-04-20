@@ -1,36 +1,86 @@
 import axios from 'axios';
 
 // Use proxied endpoints to avoid CORS issues
-const COINGECKO_BASE_URL = '/api/coingecko';
+const COINGECKO_BASE_URL = process.env.NODE_ENV === 'production' 
+  ? 'https://api.coingecko.com/api/v3'
+  : '/api/coingecko';
+
 // Using CryptoCompare for crypto news (free tier available)
-const CRYPTOCOMPARE_NEWS_URL = '/api/cryptocompare/news/';
+const CRYPTOCOMPARE_NEWS_URL = process.env.NODE_ENV === 'production'
+  ? 'https://min-api.cryptocompare.com/data/v2/news/'
+  : '/api/cryptocompare/news/';
+
 const CRYPTOCOMPARE_API_KEY = ''; // Free tier API usage is sufficient
 
 // Configure axios defaults
 axios.defaults.headers.common['Accept'] = 'application/json';
 axios.defaults.headers.common['Content-Type'] = 'application/json';
 
+// Rate limiting configuration
+const RATE_LIMIT = {
+  maxRequests: 10, // Maximum number of requests
+  timeWindow: 60000, // Time window in milliseconds (1 minute)
+  retryDelay: 60000, // Delay before retrying after rate limit (1 minute)
+};
+
+let requestQueue = [];
+let requestCount = 0;
+let lastResetTime = Date.now();
+
+// Helper function to manage rate limiting
+const manageRateLimit = async () => {
+  const now = Date.now();
+  
+  // Reset counter if time window has passed
+  if (now - lastResetTime >= RATE_LIMIT.timeWindow) {
+    requestCount = 0;
+    lastResetTime = now;
+  }
+  
+  // If we've hit the rate limit, wait
+  if (requestCount >= RATE_LIMIT.maxRequests) {
+    const waitTime = RATE_LIMIT.timeWindow - (now - lastResetTime);
+    if (waitTime > 0) {
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+      requestCount = 0;
+      lastResetTime = Date.now();
+    }
+  }
+  
+  requestCount++;
+};
+
+// Enhanced makeRequest function with retry logic
+const makeRequest = async (url, options = {}, retryCount = 0) => {
+  try {
+    await manageRateLimit();
+    
+    const response = await axios.get(url, {
+      ...options,
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    return response.data;
+  } catch (error) {
+    if (error.response?.status === 429 && retryCount < 3) {
+      console.log(`Rate limit reached, retrying in ${RATE_LIMIT.retryDelay/1000} seconds... (Attempt ${retryCount + 1}/3)`);
+      await new Promise(resolve => setTimeout(resolve, RATE_LIMIT.retryDelay));
+      return makeRequest(url, options, retryCount + 1);
+    }
+    throw error;
+  }
+};
+
 // Get list of coins from CoinGecko
 export const getCoinsList = async () => {
   try {
-    console.log('Fetching coins list from:', `${COINGECKO_BASE_URL}/coins/markets`);
-    const response = await axios.get(`${COINGECKO_BASE_URL}/coins/markets`, {
-      params: {
-        vs_currency: 'usd',
-        order: 'market_cap_desc',
-        per_page: 50,
-        page: 1,
-        sparkline: false,
-      }
-    });
-    console.log('Coins list response:', response.data);
-    return response.data;
+    const url = `${COINGECKO_BASE_URL}/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=50&page=1&sparkline=false`;
+    return await makeRequest(url);
   } catch (error) {
     console.error('Error fetching coins list:', error);
-    if (error.response) {
-      console.error('Response status:', error.response.status);
-      console.error('Response data:', error.response.data);
-    }
     throw error;
   }
 };
@@ -155,15 +205,10 @@ export const getCoinDetails = async (coinId) => {
 };
 
 // Get historical price data for a coin
-export const getCoinHistory = async (coinId, days = 7) => {
+export const getCoinHistory = async (id, days = 7) => {
   try {
-    const response = await axios.get(`${COINGECKO_BASE_URL}/coins/${coinId}/market_chart`, {
-      params: {
-        vs_currency: 'usd',
-        days: days,
-      }
-    });
-    return response.data;
+    const url = `${COINGECKO_BASE_URL}/coins/${id}/market_chart?vs_currency=usd&days=${days}`;
+    return await makeRequest(url);
   } catch (error) {
     console.error('Error fetching coin history:', error);
     throw error;
